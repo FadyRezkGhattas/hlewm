@@ -1,0 +1,16 @@
+# L2 training data config for PushT.
+# num_steps must be >= num_waypoints * min_waypoint_gap (default: 6 * 5 = 30).
+# Set generously so random waypoint sampling has room to spread out.
+dataset:
+  num_steps: 64
+  frameskip: 5
+  name: pusht_expert_train.lance
+  keys_to_load:
+    - pixels
+    - action
+    - proprio
+    - state
+  keys_to_cache:
+    - action
+    - proprio
+    - state

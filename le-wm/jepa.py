@@ -125,6 +125,25 @@ class JEPA(nn.Module):
 
         return cost
 
+    def get_cost_from_emb(self, info_dict: dict, action_candidates: torch.Tensor, goal_emb: torch.Tensor):
+        """Like get_cost but takes a precomputed goal embedding instead of goal pixels.
+
+        Used by HJEPA.get_l1_cost to target an L2 subgoal without re-encoding.
+
+        goal_emb: (B, D) — already encoded, lives in the shared latent space.
+        """
+        device = next(self.parameters()).device
+        for k in list(info_dict.keys()):
+            if torch.is_tensor(info_dict[k]):
+                info_dict[k] = info_dict[k].to(device)
+        goal_emb = goal_emb.to(device)
+
+        # goal_emb: (B, D) → (B, 1, 1, D) to match criterion's expected shape
+        B, S = action_candidates.shape[:2]
+        info_dict["goal_emb"] = goal_emb.unsqueeze(1).unsqueeze(1).expand(B, S, -1, -1)
+        info_dict = self.rollout(info_dict, action_candidates)
+        return self.criterion(info_dict)
+
     def get_cost(self, info_dict: dict, action_candidates: torch.Tensor):
         """ Compute the cost of action candidates given an info dict with goal and initial state."""
 

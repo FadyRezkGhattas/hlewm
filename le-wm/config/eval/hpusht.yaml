@@ -1,0 +1,79 @@
+defaults:
+  - launcher: local
+  - _self_
+
+world:
+  env_name: swm/PushT-v1
+  num_envs: ${eval.num_eval}
+  max_episode_steps: ??? # set to >= eval_budget in run()
+
+dataset:
+  stats: ${eval.dataset_name}
+  keys_to_cache:
+    - action
+    - proprio
+    - state
+
+seed: 42
+policy: random  # path to HJEPA checkpoint
+
+# L2 CEM solver — model=hjepa, calls hjepa.get_cost = get_l2_cost.
+# Candidates are macro-action embeddings (dim = macro_action_dim = embed_dim = 192).
+l2_solver:
+  _target_: stable_worldmodel.solver.CEMSolver
+  model: ???          # filled at runtime with hjepa
+  batch_size: 1
+  num_samples: 300
+  var_scale: 1.0
+  n_steps: 10
+  topk: 30
+  device: cuda
+  seed: ${seed}
+
+# L1 CEM solver — model=l1_adapter, calls l1_adapter.get_cost = get_cost_from_emb(subgoal).
+l1_solver:
+  _target_: stable_worldmodel.solver.CEMSolver
+  model: ???          # filled at runtime with l1_adapter
+  batch_size: 1
+  num_samples: 300
+  var_scale: 1.0
+  n_steps: 30
+  topk: 30
+  device: cuda
+  seed: ${seed}
+
+# L2 plan config. action_block=1: no frameskip at macro level.
+# The fake L2 action space is Box(shape=(1, 192)) so CEMSolver._action_dim=192.
+l2_plan_config:
+  horizon: 3           # macro-steps to plan ahead
+  receding_horizon: 1  # unused at L2 level (only first subgoal is extracted)
+  action_block: 1      # no frameskip for macro actions
+  history_len: 1
+  warm_start: false
+
+# L1 plan config — identical to flat eval plan_config.
+l1_plan_config:
+  horizon: 5
+  receding_horizon: 5
+  action_block: 5      # frameskip
+  history_len: 1
+  warm_start: true
+
+eval:
+  num_eval: 50
+  goal_offset_steps: 25
+  eval_budget: 50
+  img_size: 224
+  dataset_name: pusht_expert_train
+  callables:
+    - method: _set_state
+      args:
+        state:
+          value: state
+    - method: _set_goal_state
+      args:
+        goal_state:
+          value: goal_state
+
+output:
+  filename: hpusht_results.txt

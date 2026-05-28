@@ -214,6 +214,56 @@ class Embedder(nn.Module):
         return x
 
 
+class MacroActionEncoder(nn.Module):
+    """Maps a variable-length primitive action sequence to a fixed-dim macro-action embedding.
+
+    Prepends a learned CLS token, runs a non-causal transformer over (CLS, a_0, ..., a_{L-1}),
+    returns the CLS output. Handles variable chunk lengths across batches — no padding needed
+    when all elements in a batch share the same waypoint indices.
+
+    Input:  (B, L, action_dim)  where L varies across batches
+    Output: (B, macro_dim)
+    """
+
+    def __init__(
+        self,
+        action_dim,
+        macro_dim,
+        hidden_dim,
+        depth,
+        heads,
+        dim_head,
+        mlp_dim,
+        dropout=0.0,
+    ):
+        super().__init__()
+        self.input_proj = nn.Linear(action_dim, hidden_dim)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        self.transformer = Transformer(
+            input_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+            output_dim=hidden_dim,
+            depth=depth,
+            heads=heads,
+            dim_head=dim_head,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+            block_class=Block,  # non-causal; CLS attends to all actions
+        )
+        self.output_proj = nn.Linear(hidden_dim, macro_dim)
+
+    def forward(self, x):
+        """
+        x: (B, L, action_dim)
+        returns: (B, macro_dim)
+        """
+        x = self.input_proj(x.float())
+        cls = self.cls_token.expand(x.size(0), -1, -1)  # (B, 1, hidden_dim)
+        x = torch.cat([cls, x], dim=1)                   # (B, 1+L, hidden_dim)
+        x = self.transformer(x)                           # non-causal full attention
+        return self.output_proj(x[:, 0])                  # (B, macro_dim) — CLS only
+
+
 class MLP(nn.Module):
     """Simple MLP with optional normalization and activation"""
 

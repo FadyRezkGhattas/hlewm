@@ -1,0 +1,85 @@
+defaults:
+  - _self_
+  - launcher: local
+  - data: pusht       # swap for any env; only num_steps needs overriding for L2
+  - model: lewm       # L1 model spec — used by _build_hjepa to know dims
+
+output_model_name: hlewm
+subdir: ${hydra:job.id}
+train_level: 2
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+embed_dim: 192
+history_size: 3   # kept for L1 reference; unused in l2_forward
+num_preds: 1      # kept for L1 reference; unused in l2_forward
+
+trainer:
+  max_epochs: 100
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+loader:
+  batch_size: 64
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+# L1 loss block kept so the config parses without errors when model: lewm is loaded.
+loss:
+  sigreg:
+    weight: 0.09
+    kwargs:
+      knots: 17
+      num_proj: 1024
+
+l2:
+  l1_checkpoint: ???          # path to trained L1 JEPA weights (required)
+
+  num_waypoints: 6
+  min_waypoint_gap: 5         # minimum steps between consecutive waypoints
+                              # dataloader num_steps must be >= num_waypoints * min_waypoint_gap
+
+  model:
+    macro_action_encoder:
+      _target_: module.MacroActionEncoder
+      action_dim: ???         # set at runtime: frameskip * raw_action_dim
+      macro_dim: ${embed_dim}
+      hidden_dim: ${embed_dim}
+      depth: 4
+      heads: 8
+      dim_head: 64
+      mlp_dim: 1024
+      dropout: 0.1
+
+    predictor:
+      _target_: module.ARPredictor
+      num_frames: ${l2.num_waypoints}
+      input_dim: ${embed_dim}
+      hidden_dim: ${embed_dim}
+      output_dim: ${embed_dim}
+      depth: 6
+      heads: 16
+      mlp_dim: 2048
+      dim_head: 64
+      dropout: 0.1
+      emb_dropout: 0.0
+
+    pred_proj:
+      _target_: module.MLP
+      input_dim: ${embed_dim}
+      output_dim: ${embed_dim}
+      hidden_dim: 2048
+      norm_fn:
+        _target_: torch.nn.BatchNorm1d
+        _partial_: true
