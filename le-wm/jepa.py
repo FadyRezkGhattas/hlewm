@@ -130,7 +130,7 @@ class JEPA(nn.Module):
     def get_cost_from_emb(self, info_dict: dict, action_candidates: torch.Tensor, goal_emb: torch.Tensor):
         """Like get_cost but takes a precomputed goal embedding instead of goal pixels.
 
-        Used by HJEPA.get_l1_cost to target an L2 subgoal without re-encoding.
+        Used by SubgoalAdapter in heval.py to target an L2 subgoal without re-encoding.
 
         goal_emb: (B, D) — already encoded, lives in the shared latent space.
         """

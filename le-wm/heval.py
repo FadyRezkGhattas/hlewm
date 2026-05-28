@@ -76,15 +76,23 @@ class SubgoalAdapter:
 
     def __init__(self, jepa):
         self._jepa = jepa
-        self.subgoal_emb = None   # (n_envs_replanning, D) — set before each L1 solve
+        self.subgoal_emb = None   # (R, D) — set before each L1 solve
+        self._counter = 0         # tracks which env the CEM is currently processing
 
     def set_subgoal(self, emb):
         """emb: (R, D) where R = number of envs currently replanning."""
         self.subgoal_emb = emb
+        self._counter = 0
 
     def get_cost(self, info_dict, action_candidates):
         assert self.subgoal_emb is not None, "call set_subgoal before L1 solver"
-        return self._jepa.get_cost_from_emb(info_dict, action_candidates, self.subgoal_emb)
+        B = action_candidates.shape[0]
+        R = self.subgoal_emb.shape[0]
+        # CEM iterates envs in order with batch_size=B; cycle through subgoal_emb rows.
+        idx = (self._counter * B) % R
+        self._counter += 1
+        goal_emb = self.subgoal_emb[idx:idx + B]
+        return self._jepa.get_cost_from_emb(info_dict, action_candidates, goal_emb)
 
     def __getattr__(self, name):
         # Forward attribute lookups (e.g. .parameters(), .encoder) to the wrapped JEPA.

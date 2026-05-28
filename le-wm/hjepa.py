@@ -219,15 +219,3 @@ class HJEPA(nn.Module):
         self.log(f"{stage}/l2_pred_loss", loss.detach(), on_step=True, sync_dist=True)
         return {"loss": loss}
 
-    def get_l1_cost(self, info_dict, action_candidates, subgoal_emb):
-        """L1 CEM cost function: reach a subgoal embedding with primitive actions.
-
-        Bypasses goal-pixel encoding — subgoal_emb is already in the shared latent space.
-
-        info_dict:         dict with "pixels" observation history
-        action_candidates: (B, S, T, action_dim)
-        subgoal_emb:       (B, D) — target embedding from L2 plan
-
-        returns: (B, S) cost
-        """
-        return self.l1_jepa.get_cost_from_emb(info_dict, action_candidates, subgoal_emb)
