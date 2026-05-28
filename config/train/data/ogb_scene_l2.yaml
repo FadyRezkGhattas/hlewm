@@ -1,0 +1,13 @@
+dataset:
+  num_steps: 30
+  frameskip: 5
+  name: ogbench--scene_single_expert.h5
+  keys_to_load:
+    - pixels
+    - action
+    - observation
+  keys_to_cache:
+    - action
+    - observation
+  keys_to_merge:
+    proprio: proprio
