@@ -1,10 +1,11 @@
 # L2 training data config for PushT.
-# num_steps must be >= num_waypoints * min_waypoint_gap (default: 6 * 5 = 30).
-# Set generously so random waypoint sampling has room to spread out.
+# num_steps = num_waypoints * min_waypoint_gap (6 * 5 = 30).
+# PushT episodes are max 246 raw frames; with frameskip=5 the usable window is 49 steps,
+# so 30 is both the minimum for waypoint sampling and close to the practical ceiling.
 dataset:
-  num_steps: 64
+  num_steps: 30
   frameskip: 5
-  name: pusht_expert_train.lance
+  name: pusht_expert_train.h5
   keys_to_load:
     - pixels
     - action
