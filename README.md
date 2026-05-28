@@ -1,147 +1,195 @@
+# HLEWM — Hierarchical LeWorldModel
 
-# LeWorldModel
-### Stable End-to-End Joint-Embedding Predictive Architecture from Pixels
+This codebase implements two things built on top of each other:
 
-[Lucas Maes*](https://x.com/lucasmaes_), [Quentin Le Lidec*](https://quentinll.github.io/), [Damien Scieur](https://scholar.google.com/citations?user=hNscQzgAAAAJ&hl=fr), [Yann LeCun](https://yann.lecun.com/) and [Randall Balestriero](https://randallbalestriero.github.io/)
+1. **LeWM (flat)** — a JEPA world model trained end-to-end from pixels. Plans actions via CEM in a 192-dim latent space.
+2. **HLEWM (hierarchical)** — adds a second-level world model on top of a frozen LeWM. The high level plans *where to go* (subgoal embeddings); the low level plans *how to get there* (primitive actions).
 
-**Abstract:** Joint Embedding Predictive Architectures (JEPAs) offer a compelling framework for learning world models in compact latent spaces, yet existing methods remain fragile, relying on complex multi-term losses, exponential moving averages, pretrained encoders, or auxiliary supervision to avoid representation collapse. In this work, we introduce LeWorldModel (LeWM), the first JEPA that trains stably end-to-end from raw pixels using only two loss terms: a next-embedding prediction loss and a regularizer enforcing Gaussian-distributed latent embeddings. This reduces tunable loss hyperparameters from six to one compared to the only existing end-to-end alternative. With ~15M parameters trainable on a single GPU in a few hours, LeWM plans up to 48× faster than foundation-model-based world models while remaining competitive across diverse 2D and 3D control tasks. Beyond control, we show that LeWM's latent space encodes meaningful physical structure through probing of physical quantities. Surprise evaluation confirms that the model reliably detects physically implausible events.
+You always train L1 first, then optionally train L2 on top of a frozen L1 checkpoint.
 
-<p align="center">
-   <b>[ <a href="https://arxiv.org/pdf/2603.19312v1">Paper</a> | <a href="https://huggingface.co/collections/quentinll/lewm">Checkpoints &amp; Data</a> | <a href="https://le-wm.github.io/">Website</a> ]</b>
-</p>
+Supported environments: **PushT**, **OGBench Cube**, **OGBench Scene**.
 
-<br>
+---
 
-<p align="center">
-  <img src="assets/lewm.gif" width="80%">
-</p>
+## Installation
 
-If you find this code useful, please reference it in your paper:
-```
-@article{maes_lelidec2026lewm,
-  title={LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels},
-  author={Maes, Lucas and Le Lidec, Quentin and Scieur, Damien and LeCun, Yann and Balestriero, Randall},
-  journal={arXiv preprint},
-  year={2026}
-}
+```bash
+conda activate hlewm
 ```
 
-## Using the code
-This codebase builds on [stable-worldmodel](https://github.com/galilai-group/stable-worldmodel) for environment management, planning, and evaluation, and [stable-pretraining](https://github.com/galilai-group/stable-pretraining) for training. Together they reduce this repository to its core contribution: the model architecture and training objective.
+The `hlewm` conda environment already has all dependencies. If starting fresh:
 
-**Installation:**
 ```bash
 uv venv --python=3.10
 source .venv/bin/activate
 uv pip install stable-worldmodel[train,env]
 ```
 
+---
+
 ## Data
 
-Datasets use the HDF5 format for fast loading. Download the data from [HuggingFace](https://huggingface.co/collections/quentinll/lewm) and decompress with:
+Training and evaluation both require offline expert demonstration datasets in HDF5 format.
+All datasets live under `$STABLEWM_HOME/datasets/` (defaults to `~/.stable_worldmodel/datasets/`).
+
+| File | Environment |
+|---|---|
+| `pusht_expert_train.h5` | PushT |
+| `ogbench--cube_single_expert.h5` | OGBench Cube |
+| `ogbench--scene_single_expert.h5` | OGBench Scene |
+
+The `--` in the OGBench filenames is not a typo — it is how swm caches downloaded datasets (replacing `/` with `--`).
+
+### PushT
+
+Download from HuggingFace and place in the datasets folder:
 
 ```bash
-tar --zstd -xvf archive.tar.zst
+hf download quentinll/lewm-pusht --repo-type dataset --local-dir /tmp/pusht
+zstd -d /tmp/pusht/pusht_expert_train.h5.zst -o ~/.stable_worldmodel/datasets/pusht_expert_train.h5
 ```
 
-Place the extracted `.h5` files under `$STABLEWM_HOME` (defaults to `~/.stable-wm/`). You can override this path:
+### OGBench (Cube and Scene)
+
+OGBench datasets are not on HuggingFace. You have two options:
+
+**Option A — get the pre-built files from a collaborator.**
+The files need to land at their exact names in `~/.stable_worldmodel/datasets/`. If you receive them as `.tar.zst` archives, extract them:
+
 ```bash
-export STABLEWM_HOME=/path/to/your/storage
+tar --zstd -xvf cube_single_expert.tar.zst -C ~/.stable_worldmodel/datasets/
+# rename to match expected filename if necessary:
+mv ~/.stable_worldmodel/datasets/cube_single_expert.h5 \
+   ~/.stable_worldmodel/datasets/ogbench--cube_single_expert.h5
 ```
 
-Dataset names are specified without the `.h5` extension. For example, `config/train/data/pusht.yaml` references `pusht_expert_train`, which resolves to `$STABLEWM_HOME/pusht_expert_train.h5`.
+**Option B — collect from scratch using the expert policy.**
+swm ships an oracle policy for OGBench. This takes ~30 min per 1000 episodes on a single CPU:
+
+```bash
+python collect_ogbench.py --env cube --episodes 1000
+python collect_ogbench.py --env scene --episodes 1000
+```
+
+### Verify your setup
+
+```bash
+ls ~/.stable_worldmodel/datasets/
+# pusht_expert_train.h5  ogbench--cube_single_expert.h5  ogbench--scene_single_expert.h5
+```
+
+---
 
 ## Training
 
-`jepa.py` contains the PyTorch implementation of LeWM. Training is configured via [Hydra](https://hydra.cc/) config files under `config/train/`.
+### Step 1 — Train L1 (flat LeWM)
 
-Before training, set your WandB `entity` and `project` in `config/train/lewm.yaml`:
-```yaml
-wandb:
-  config:
-    entity: your_entity
-    project: your_project
-```
+This trains the core world model: a ViT encoder + autoregressive predictor, regularised by SIGReg to prevent collapse.
 
-To launch training:
 ```bash
+# PushT
 python train.py data=pusht
+
+# OGBench Cube
+python train.py data=ogb
+
+# OGBench Scene
+python train.py data=ogb_scene
 ```
 
-Checkpoints are saved to `$STABLEWM_HOME/checkpoints/<run_name>/` upon completion.
+The config file is `config/train/lewm.yaml`. The `data=` argument swaps only the dataset config (under `config/train/data/`); everything else (model, optimizer, trainer) stays the same.
 
-For baseline scripts, see the stable-worldmodel [scripts](https://github.com/galilai-group/stable-worldmodel/tree/main/scripts/train) folder.
+Checkpoints are saved to `$STABLEWM_HOME/checkpoints/<run_id>/` as `weights.pt` + `config.json`.
 
-## Planning
+### Step 2 — Train L2 (hierarchical top level, optional)
 
-Evaluation configs live under `config/eval/`. Set the `policy` field to a HuggingFace repo ID or a local path relative to `$STABLEWM_HOME/checkpoints/` (a folder or `.pt` file, each with a sibling `config.json`):
+L2 learns to predict *waypoints* in the L1 latent space, conditioned on macro-action embeddings. It requires a trained L1 checkpoint.
 
 ```bash
-# HuggingFace repo ID — downloads weights.pt + config.json on first use
-python eval.py --config-name=pusht.yaml policy=FadyRezk/lewm-pusht-fixed
+# PushT
+python train.py --config-name hlewm data=pusht_l2 l2.l1_checkpoint=<L1_run_id>
 
-# local folder under $STABLEWM_HOME/checkpoints/
-python eval.py --config-name=pusht.yaml policy=pusht/lewm
+# OGBench Cube
+python train.py --config-name hlewm data=ogb_l2 l2.l1_checkpoint=<L1_run_id>
+
+# OGBench Scene
+python train.py --config-name hlewm data=ogb_scene_l2 l2.l1_checkpoint=<L1_run_id>
 ```
 
-## Pretrained Checkpoints
+`<L1_run_id>` is the folder name under `$STABLEWM_HOME/checkpoints/` (e.g. `1` if Hydra gave your job ID 1), or a HuggingFace repo ID (e.g. `FadyRezk/lewm-pusht-fixed`).
 
-Pretrained LeWM checkpoints for each environment are mirrored on the Hugging Face
-Hub (model repos), alongside the datasets (dataset repos) in the same collection:
+The `pusht_l2` / `ogb_l2` / `ogb_scene_l2` configs differ from their L1 counterparts only in `num_steps` (longer sequences, needed for waypoint sampling).
 
-- [`quentinll/lewm-pusht`](https://huggingface.co/quentinll/lewm-pusht)
-- [`quentinll/lewm-cube`](https://huggingface.co/quentinll/lewm-cube)
-- [`quentinll/lewm-tworooms`](https://huggingface.co/quentinll/lewm-tworooms)
-- [`quentinll/lewm-reacher`](https://huggingface.co/quentinll/lewm-reacher)
+---
 
-The full baseline checkpoint suite (PLDM, LeJEPA, IVL, IQL, GCBC, DINO-WM, DINO-WM-noprop)
-is available on [Google Drive](https://drive.google.com/drive/folders/1r31os0d4-rR0mdHc7OlY_e5nh3XT4r4e):
+## Evaluation
 
-<div align="center">
+### Flat L1 eval
 
-| Method | two-room | pusht | cube | reacher |
-|:---:|:---:|:---:|:---:|:---:|
-| pldm | ✓ | ✓ | ✓ | ✓ |
-| lejepa | ✓ | ✓ | ✓ | ✓ |
-| ivl | ✓ | ✓ | ✓ | — |
-| iql | ✓ | ✓ | ✓ | — |
-| gcbc | ✓ | ✓ | ✓ | — |
-| dinowm | ✓ | ✓ | — | — |
-| dinowm_noprop | ✓ | ✓ | ✓ | ✓ |
+Uses `eval.py`. The policy runs CEM in the 192-dim latent space to plan primitive actions.
 
-</div>
+```bash
+# PushT
+python eval.py --config-name pusht policy=<checkpoint>
 
-## Loading a checkpoint
+# OGBench Cube
+python eval.py --config-name cube policy=<checkpoint>
 
-Checkpoints use the `weights.pt` + `config.json` format consumed by `stable_worldmodel.wm.utils.load_pretrained`.
+# OGBench Scene
+python eval.py --config-name scene policy=<checkpoint>
+```
 
-### From Hugging Face
+`<checkpoint>` is a run folder under `$STABLEWM_HOME/checkpoints/`, or a HuggingFace repo ID.
 
-Pass the repo ID as the `policy` argument. The library downloads `weights.pt` and `config.json` to `$STABLEWM_HOME/checkpoints/models--<user>--<repo>/` on first use:
+### Hierarchical L2+L1 eval
+
+Uses `heval.py`. L2 CEM plans a macro-action embedding sequence → extracts first subgoal → L1 CEM reaches it with primitive actions.
+
+```bash
+# PushT
+python heval.py --config-name hpusht policy=<HJEPA_checkpoint>
+
+# OGBench Cube
+python heval.py --config-name hcube policy=<HJEPA_checkpoint>
+
+# OGBench Scene
+python heval.py --config-name hscene policy=<HJEPA_checkpoint>
+```
+
+The HJEPA checkpoint is what L2 training produces — it bundles the frozen L1 and the trained L2 predictor together.
+
+### Config map
+
+| Script | Config name | Environment |
+|---|---|---|
+| `eval.py` | `pusht` | PushT (flat) |
+| `eval.py` | `cube` | OGBench Cube (flat) |
+| `eval.py` | `scene` | OGBench Scene (flat) |
+| `heval.py` | `hpusht` | PushT (hierarchical) |
+| `heval.py` | `hcube` | OGBench Cube (hierarchical) |
+| `heval.py` | `hscene` | OGBench Scene (hierarchical) |
+
+---
+
+## Pretrained checkpoints
+
+L1 checkpoints are on HuggingFace. Pass the repo ID as `policy=` directly — swm downloads and caches them automatically.
 
 ```bash
 python eval.py --config-name pusht policy=FadyRezk/lewm-pusht-fixed
 ```
 
-Expected: **86%** success rate (paper Table 1).
+Expected: **86%** success on PushT.
 
-### From a local folder
+---
 
-Place a folder containing `weights.pt` + `config.json` under `$STABLEWM_HOME/checkpoints/` and pass the relative path:
+## Quick-start smoke test
 
-```bash
-python eval.py --config-name pusht policy=pusht/lewm
-```
-
-### Dataset
-
-Download and decompress the PushT dataset:
+To verify the hierarchical pipeline without running full training, bootstrap a random HJEPA checkpoint and run it:
 
 ```bash
-hf download quentinll/lewm-pusht --repo-type dataset --local-dir $STABLEWM_HOME
-zstd -d $STABLEWM_HOME/pusht_expert_train.h5.zst -o $STABLEWM_HOME/pusht_expert_train.h5
-mv $STABLEWM_HOME/pusht_expert_train.h5 $STABLEWM_HOME/datasets/pusht_expert_train.h5
+python bootstrap_hjepa.py        # creates a random-weight HJEPA under $STABLEWM_HOME/checkpoints/hlewm/
+python heval.py --config-name hpusht policy=hlewm
 ```
 
-## Contact & Contributions
-Feel free to open [issues](https://github.com/lucas-maes/le-wm/issues)! For questions or collaborations, please contact `lucas.maes@mila.quebec`
+This will score near 0% but confirms the full stack (data loading, model, CEM, env) is wired correctly.
