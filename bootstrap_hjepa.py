@@ -15,8 +15,8 @@ from pathlib import Path
 import stable_worldmodel as swm
 from stable_worldmodel.wm.utils import _resolve
 
-from hjepa import HJEPA
-from module import MacroActionEncoder, ARPredictor, MLP
+from models.lewm.hier import HJEPA
+from models.modules.module import MacroActionEncoder, ARPredictor, MLP
 
 L1_NAME = "FadyRezk/lewm-pusht-fixed"
 OUT_NAME = "hlewm"
@@ -27,7 +27,7 @@ NUM_WAYPOINTS = 6
 cache_dir = Path(swm.data.utils.get_cache_dir(sub_folder='checkpoints'))
 
 _, l1_config = _resolve(L1_NAME, cache_dir)
-l1_config["_target_"] = "jepa.JEPA"
+l1_config["_target_"] = "models.lewm.wm.JEPA"
 l1_jepa = swm.wm.utils.load_pretrained(L1_NAME)
 
 macro_action_encoder = MacroActionEncoder(
@@ -52,21 +52,21 @@ hjepa = HJEPA(
 )
 
 hjepa_config = {
-    "_target_": "hjepa.HJEPA",
+    "_target_": "models.lewm.hier.HJEPA",
     "l1_jepa": l1_config,
     "macro_action_encoder": {
-        "_target_": "module.MacroActionEncoder",
+        "_target_": "models.modules.module.MacroActionEncoder",
         "action_dim": ACTION_DIM, "macro_dim": EMBED_DIM, "hidden_dim": EMBED_DIM,
         "depth": 4, "heads": 8, "dim_head": 64, "mlp_dim": 1024, "dropout": 0.1,
     },
     "l2_predictor": {
-        "_target_": "module.ARPredictor",
+        "_target_": "models.modules.module.ARPredictor",
         "num_frames": NUM_WAYPOINTS, "input_dim": EMBED_DIM, "hidden_dim": EMBED_DIM,
         "output_dim": EMBED_DIM, "depth": 6, "heads": 16, "mlp_dim": 2048,
         "dim_head": 64, "dropout": 0.1, "emb_dropout": 0.0,
     },
     "l2_pred_proj": {
-        "_target_": "module.MLP",
+        "_target_": "models.modules.module.MLP",
         "input_dim": EMBED_DIM, "output_dim": EMBED_DIM, "hidden_dim": 2048,
         "norm_fn": {"_target_": "torch.nn.BatchNorm1d", "_partial_": True},
     },
