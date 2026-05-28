@@ -15,6 +15,21 @@ from module import SIGReg
 from utils import get_column_normalizer, get_img_preprocessor, SaveCkptCallback
 
 
+def _build_hjepa_config(cfg):
+    """Return an OmegaConf DictConfig that load_pretrained can use to reconstruct HJEPA."""
+    cache_dir = Path(swm.data.utils.get_cache_dir(sub_folder='checkpoints'))
+    _, l1_cfg = swm.wm.utils._resolve(str(cfg.l2.l1_checkpoint), cache_dir)
+    l1_cfg["_target_"] = "jepa.JEPA"
+    l2 = OmegaConf.to_container(cfg.l2.model, resolve=True)
+    return OmegaConf.create({
+        "_target_": "hjepa.HJEPA",
+        "l1_jepa": l1_cfg,
+        "macro_action_encoder": l2["macro_action_encoder"],
+        "l2_predictor": l2["predictor"],
+        "l2_pred_proj": l2["pred_proj"],
+    })
+
+
 def _build_hjepa(cfg):
     """Load frozen L1 JEPA from checkpoint and build HJEPA with fresh L2 components."""
     l1_jepa = swm.wm.utils.load_pretrained(cfg.l2.l1_checkpoint)
@@ -104,7 +119,7 @@ def run(cfg):
             forward=HJEPA.training_forward,
             optim=optimizers,
         )
-        ckpt_cfg = cfg.l2.model
+        ckpt_cfg = _build_hjepa_config(cfg)
 
     ##########################
     ##       training       ##

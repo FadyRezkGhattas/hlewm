@@ -2,11 +2,12 @@ import numpy as np
 import torch
 from stable_pretraining import data as dt
 from lightning.pytorch.callbacks import Callback
+from torchvision.transforms import v2
 
 def get_img_preprocessor(source: str, target: str, img_size: int = 224):
     imagenet_stats = dt.dataset_stats.ImageNet
     to_image = dt.transforms.ToImage(**imagenet_stats, source=source, target=target)
-    resize = dt.transforms.Resize(img_size, source=source, target=target)
+    resize = dt.transforms.WrapTorchTransform(v2.Resize(img_size), source=source, target=target)
     return dt.transforms.Compose(to_image, resize)
 
 
@@ -56,5 +57,5 @@ class SaveCkptCallback(Callback):
             model,
             run_name=self.run_name,
             config=self.cfg,
-            filename=f'weights_epoch_{epoch}.pt',
+            filename='weights.pt',
         )
