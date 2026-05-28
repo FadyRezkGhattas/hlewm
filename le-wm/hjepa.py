@@ -181,6 +181,44 @@ class HJEPA(nn.Module):
 
         return cost
 
+    # ------------------------------------------------------------------
+    # Training forward (bound to spt.Module at training time)
+    # ------------------------------------------------------------------
+
+    def training_forward(self, batch, stage):
+        """L2 training: random waypoint sampling → MSE only, no SIGReg.
+
+        Called as an unbound method: spt.Module(forward=HJEPA.training_forward).
+        spt.Module binds itself as `self`, so self here is the Lightning module.
+        Access the HJEPA model via self.model; config via self.cfg.
+        """
+        import random
+        cfg = self.cfg
+        T = batch["pixels"].size(1)
+        N = cfg.l2.num_waypoints
+        min_gap = cfg.l2.min_waypoint_gap
+
+        pool = list(range(min_gap, T - min_gap))
+        intermediates = sorted(random.sample(pool, N - 2))
+        wp_indices = [0] + intermediates + [T - 1]
+
+        pixels_wp = batch["pixels"][:, wp_indices]
+
+        batch["action"] = torch.nan_to_num(batch["action"], 0.0)
+        action_chunks = [
+            batch["action"][:, wp_indices[k]:wp_indices[k + 1]]
+            for k in range(N - 1)
+        ]
+
+        wp_embs = self.model.encode_waypoints(pixels_wp)
+        macro_embs = self.model.encode_macro_actions(action_chunks)
+        pred_embs = self.model.predict(wp_embs, macro_embs)
+        tgt_embs = wp_embs[:, 1:].detach()
+
+        loss = (pred_embs - tgt_embs).pow(2).mean()
+        self.log(f"{stage}/l2_pred_loss", loss.detach(), on_step=True, sync_dist=True)
+        return {"loss": loss}
+
     def get_l1_cost(self, info_dict, action_candidates, subgoal_emb):
         """L1 CEM cost function: reach a subgoal embedding with primitive actions.
 

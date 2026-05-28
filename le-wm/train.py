@@ -1,6 +1,4 @@
 import os
-import random
-from functools import partial
 from pathlib import Path
 
 import hydra
@@ -12,84 +10,9 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
 from hjepa import HJEPA
+from jepa import JEPA
 from module import SIGReg
 from utils import get_column_normalizer, get_img_preprocessor, SaveCkptCallback
-
-
-def lejepa_forward(self, batch, stage, cfg):
-    """L1 flat LeWM forward: encode → predict → MSE + SIGReg."""
-
-    ctx_len = cfg.history_size
-    n_preds = cfg.num_preds
-    lambd = cfg.loss.sigreg.weight
-
-    # Replace NaN values with 0 (occurs at sequence boundaries)
-    batch["action"] = torch.nan_to_num(batch["action"], 0.0)
-
-    output = self.model.encode(batch)
-
-    emb = output["emb"]      # (B, T, D)
-    act_emb = output["act_emb"]
-
-    ctx_emb = emb[:, :ctx_len]
-    ctx_act = act_emb[:, :ctx_len]
-
-    tgt_emb = emb[:, n_preds:]           # label
-    pred_emb = self.model.predict(ctx_emb, ctx_act)  # pred
-
-    output["pred_loss"] = (pred_emb - tgt_emb).pow(2).mean()
-    output["sigreg_loss"] = self.sigreg(emb.transpose(0, 1))
-    output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]
-
-    losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
-    self.log_dict(losses_dict, on_step=True, sync_dist=True)
-    return output
-
-
-def l2_forward(self, batch, stage, cfg):
-    """L2 high-level world model forward: waypoint MSE only, no SIGReg.
-
-    Randomly samples N waypoint indices (shared across the batch), extracts
-    variable-length action chunks between consecutive waypoints, encodes with
-    the frozen L1 encoder, then trains the L2 predictor to predict each next
-    waypoint embedding from the current one and its macro-action.
-    """
-    T = batch["pixels"].size(1)
-    N = cfg.l2.num_waypoints
-    min_gap = cfg.l2.min_waypoint_gap
-
-    # Sample shared waypoint indices: fixed endpoints, random intermediates.
-    # 'shared across batch' means no padding is needed — all elements in this
-    # batch have the same chunk lengths.
-    pool = list(range(min_gap, T - min_gap))
-    intermediates = sorted(random.sample(pool, N - 2))
-    wp_indices = [0] + intermediates + [T - 1]
-
-    # Waypoint pixels: (B, N, C, H, W)
-    pixels_wp = batch["pixels"][:, wp_indices]
-
-    # Variable-length action chunks between consecutive waypoints.
-    # chunk[k]: (B, L_k, action_dim)  where L_k = wp_indices[k+1] - wp_indices[k]
-    batch["action"] = torch.nan_to_num(batch["action"], 0.0)
-    action_chunks = [
-        batch["action"][:, wp_indices[k]:wp_indices[k + 1]]
-        for k in range(N - 1)
-    ]
-
-    # Encode waypoints with frozen L1 encoder → (B, N, D)
-    wp_embs = self.model.encode_waypoints(pixels_wp)
-
-    # Encode macro-actions → (B, N-1, D)
-    macro_embs = self.model.encode_macro_actions(action_chunks)
-
-    # L2 teacher-forced prediction → (B, N-1, D)
-    pred_embs = self.model.predict(wp_embs, macro_embs)
-    tgt_embs = wp_embs[:, 1:].detach()   # targets from frozen encoder; detach is redundant but explicit
-
-    loss = (pred_embs - tgt_embs).pow(2).mean()
-
-    self.log(f"{stage}/l2_pred_loss", loss.detach(), on_step=True, sync_dist=True)
-    return {"loss": loss}
 
 
 def _build_hjepa(cfg):
@@ -136,7 +59,6 @@ def run(cfg):
         if train_level == 1:
             cfg.model.action_encoder.input_dim = raw_action_dim
         else:
-            # L1 model config is present for reference; set L2 macro action encoder dim.
             cfg.model.action_encoder.input_dim = raw_action_dim  # kept for completeness
             cfg.l2.model.macro_action_encoder.action_dim = raw_action_dim
 
@@ -169,7 +91,8 @@ def run(cfg):
         module = spt.Module(
             model=world_model,
             sigreg=SIGReg(**cfg.loss.sigreg.kwargs),
-            forward=partial(lejepa_forward, cfg=cfg),
+            cfg=cfg,
+            forward=JEPA.training_forward,
             optim=optimizers,
         )
         ckpt_cfg = cfg.model
@@ -177,7 +100,8 @@ def run(cfg):
         world_model = _build_hjepa(cfg)
         module = spt.Module(
             model=world_model,
-            forward=partial(l2_forward, cfg=cfg),
+            cfg=cfg,
+            forward=HJEPA.training_forward,
             optim=optimizers,
         )
         ckpt_cfg = cfg.l2.model

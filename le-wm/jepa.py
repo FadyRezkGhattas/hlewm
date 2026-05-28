@@ -5,8 +5,10 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
+
 def detach_clone(v):
     return v.detach().clone() if torch.is_tensor(v) else v
+
 
 class JEPA(nn.Module):
 
@@ -168,5 +170,38 @@ class JEPA(nn.Module):
         info_dict = self.rollout(info_dict, action_candidates)
 
         cost = self.criterion(info_dict)
-        
+
         return cost
+
+    # ------------------------------------------------------------------
+    # Training forward (bound to spt.Module at training time)
+    # ------------------------------------------------------------------
+
+    def training_forward(self, batch, stage):
+        """L1 training: encode → predict → MSE + SIGReg.
+
+        Called as an unbound method: spt.Module(forward=JEPA.training_forward).
+        spt.Module binds itself as `self`, so self here is the Lightning module.
+        Access the JEPA model via self.model; config via self.cfg.
+        """
+        cfg = self.cfg
+        ctx_len = cfg.history_size
+        n_preds = cfg.num_preds
+        lambd = cfg.loss.sigreg.weight
+
+        batch["action"] = torch.nan_to_num(batch["action"], 0.0)
+
+        output = self.model.encode(batch)
+        emb = output["emb"]
+        act_emb = output["act_emb"]
+
+        pred_emb = self.model.predict(emb[:, :ctx_len], act_emb[:, :ctx_len])
+        tgt_emb = emb[:, n_preds:]
+
+        output["pred_loss"] = (pred_emb - tgt_emb).pow(2).mean()
+        output["sigreg_loss"] = self.sigreg(emb.transpose(0, 1))
+        output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]
+
+        losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
+        self.log_dict(losses_dict, on_step=True, sync_dist=True)
+        return output
