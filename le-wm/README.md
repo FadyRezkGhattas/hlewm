@@ -68,20 +68,20 @@ To launch training:
 python train.py data=pusht
 ```
 
-Checkpoints are saved to `$STABLEWM_HOME` upon completion.
+Checkpoints are saved to `$STABLEWM_HOME/checkpoints/<run_name>/` upon completion.
 
 For baseline scripts, see the stable-worldmodel [scripts](https://github.com/galilai-group/stable-worldmodel/tree/main/scripts/train) folder.
 
 ## Planning
 
-Evaluation configs live under `config/eval/`. Set the `policy` field to the checkpoint path **relative to `$STABLEWM_HOME`**, without the `_object.ckpt` suffix:
+Evaluation configs live under `config/eval/`. Set the `policy` field to a HuggingFace repo ID or a local path relative to `$STABLEWM_HOME/checkpoints/` (a folder or `.pt` file, each with a sibling `config.json`):
 
 ```bash
-# ✓ correct
-python eval.py --config-name=pusht.yaml policy=pusht/lewm
+# HuggingFace repo ID — downloads weights.pt + config.json on first use
+python eval.py --config-name=pusht.yaml policy=FadyRezk/lewm-pusht-fixed
 
-# ✗ incorrect
-python eval.py --config-name=pusht.yaml policy=pusht/lewm_object.ckpt
+# local folder under $STABLEWM_HOME/checkpoints/
+python eval.py --config-name=pusht.yaml policy=pusht/lewm
 ```
 
 ## Pretrained Checkpoints
@@ -113,115 +113,35 @@ is available on [Google Drive](https://drive.google.com/drive/folders/1r31os0d4-
 
 ## Loading a checkpoint
 
-### From the Drive archive
+Checkpoints use the `weights.pt` + `config.json` format consumed by `stable_worldmodel.wm.utils.load_pretrained`.
 
-Each tar archive contains two files per checkpoint:
-- `<name>_object.ckpt` — a serialized Python object for convenient loading; this is what `eval.py` and the `stable_worldmodel` API use
-- `<name>_weight.ckpt` — a weights-only checkpoint (`state_dict`) for cases where you want to load weights into your own model instance
+### From Hugging Face
 
-Place the extracted files under `$STABLEWM_HOME/` and load via:
-
-```python
-import stable_worldmodel as swm
-
-# Load the cost model (for MPC)
-cost = swm.policy.AutoCostModel('pusht/lewm')
-```
-
-`AutoCostModel` accepts:
-- `run_name` — checkpoint path **relative to `$STABLEWM_HOME`**, without the `_object.ckpt` suffix
-- `cache_dir` — optional override for the checkpoint root (defaults to `$STABLEWM_HOME`)
-
-The returned module is in `eval` mode with its PyTorch weights accessible via `.state_dict()`.
-
-### From the Hugging Face mirror — end-to-end (PushT example)
-
-The HF repos ship `weights.pt` + `config.json`. The steps below download, convert,
-and evaluate in one go. Swap `pusht` for `cube`, `tworooms`, or `reacher` throughout
-for other environments.
-
-**1. Download checkpoint and dataset**
+Pass the repo ID as the `policy` argument. The library downloads `weights.pt` and `config.json` to `$STABLEWM_HOME/checkpoints/models--<user>--<repo>/` on first use:
 
 ```bash
-hf download quentinll/lewm-pusht   --local-dir $STABLEWM_HOME/hf_pusht
-hf download quentinll/pusht-expert --repo-type dataset --local-dir $STABLEWM_HOME
+python eval.py --config-name pusht policy=FadyRezk/lewm-pusht-fixed
 ```
 
-If the dataset arrives as `.tar.zst`, decompress it:
+Expected: **86%** success rate (paper Table 1).
 
-```bash
-tar --zstd -xvf $STABLEWM_HOME/pusht_expert_train.tar.zst -C $STABLEWM_HOME/
-```
+### From a local folder
 
-**2. Convert to object checkpoint**
-
-`eval.py` expects a pickled model at `$STABLEWM_HOME/pusht/lewm_object.ckpt`.
-Two fixes vs. the original README are applied here: Hydra `_target_` keys stripped
-from `config.json`, and ViT weight keys remapped from the older transformers naming
-convention used when the checkpoint was saved.
-
-```bash
-python - <<'PY'
-import json, re, torch, stable_pretraining as spt
-from pathlib import Path
-from jepa import JEPA
-from module import ARPredictor, Embedder, MLP
-import stable_worldmodel as swm
-
-src = Path(swm.data.utils.get_cache_dir(), "hf_pusht")
-out = Path(swm.data.utils.get_cache_dir(), "pusht", "lewm_object.ckpt")
-
-cfg = json.loads((src / "config.json").read_text())
-def kwargs(key): return {k: v for k, v in cfg[key].items() if not k.startswith("_")}
-
-encoder = spt.backbone.utils.vit_hf(
-    cfg["encoder"]["size"],
-    patch_size=cfg["encoder"]["patch_size"],
-    image_size=cfg["encoder"]["image_size"],
-    pretrained=False, use_mask_token=False,
-)
-mlp = lambda k: MLP(input_dim=cfg[k]["input_dim"], output_dim=cfg[k]["output_dim"],
-                    hidden_dim=cfg[k]["hidden_dim"], norm_fn=torch.nn.BatchNorm1d)
-model = JEPA(
-    encoder=encoder,
-    predictor=ARPredictor(**kwargs("predictor")),
-    action_encoder=Embedder(**kwargs("action_encoder")),
-    projector=mlp("projector"),
-    pred_proj=mlp("pred_proj"),
-)
-
-sd = torch.load(src / "weights.pt", map_location="cpu", weights_only=False)
-
-# Remap ViT encoder keys from old transformers naming to current naming.
-rules = [
-    (r'encoder\.encoder\.layer\.(\d+)\.attention\.attention\.query', r'encoder.layers.\1.attention.q_proj'),
-    (r'encoder\.encoder\.layer\.(\d+)\.attention\.attention\.key',   r'encoder.layers.\1.attention.k_proj'),
-    (r'encoder\.encoder\.layer\.(\d+)\.attention\.attention\.value', r'encoder.layers.\1.attention.v_proj'),
-    (r'encoder\.encoder\.layer\.(\d+)\.attention\.output\.dense',    r'encoder.layers.\1.attention.o_proj'),
-    (r'encoder\.encoder\.layer\.(\d+)\.intermediate\.dense',         r'encoder.layers.\1.mlp.fc1'),
-    (r'encoder\.encoder\.layer\.(\d+)\.output\.dense',               r'encoder.layers.\1.mlp.fc2'),
-    (r'encoder\.encoder\.layer\.(\d+)\.',                            r'encoder.layers.\1.'),
-]
-def remap(k):
-    for pattern, repl in rules:
-        k = re.sub(pattern, repl, k)
-    return k
-sd = {remap(k): v for k, v in sd.items()}
-model.load_state_dict(sd, strict=True)
-
-out.parent.mkdir(parents=True, exist_ok=True)
-torch.save(model, out)
-print("saved to", out)
-PY
-```
-
-**3. Evaluate**
+Place a folder containing `weights.pt` + `config.json` under `$STABLEWM_HOME/checkpoints/` and pass the relative path:
 
 ```bash
 python eval.py --config-name pusht policy=pusht/lewm
 ```
 
-Expected: **86%** success rate (paper Table 1).
+### Dataset
+
+Download and decompress the PushT dataset:
+
+```bash
+hf download quentinll/lewm-pusht --repo-type dataset --local-dir $STABLEWM_HOME
+zstd -d $STABLEWM_HOME/pusht_expert_train.h5.zst -o $STABLEWM_HOME/pusht_expert_train.h5
+mv $STABLEWM_HOME/pusht_expert_train.h5 $STABLEWM_HOME/datasets/pusht_expert_train.h5
+```
 
 ## Contact & Contributions
 Feel free to open [issues](https://github.com/lucas-maes/le-wm/issues)! For questions or collaborations, please contact `lucas.maes@mila.quebec`

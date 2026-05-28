@@ -64,11 +64,11 @@ Read this file before editing any code. It is self-contained — you do not need
 | `hjepa.py:97` | `HJEPA.rollout_l2` | **Inference only.** Takes macro embeddings directly (no encoding). CEM candidates ARE the macro embeddings. |
 | `hjepa.py:130` | `HJEPA.get_cost` | Routes to get_l2_cost. Makes HJEPA compatible with WorldModelPolicy as L2 planner. |
 | `hjepa.py:143` | `HJEPA.get_l2_cost` | L2 CEM cost: encode current obs + goal → rollout_l2 → terminal MSE |
-| `hjepa.py:175` | `HJEPA.get_l1_cost` | L1 CEM cost via get_cost_from_emb with L2 subgoal as target |
 | `train.py:55` | `l2_forward` | L2 loss: random waypoint sampling → MSE only, no SIGReg |
-| `train.py:97` | `_build_hjepa` | Loads L1 from checkpoint, instantiates L2 components, returns HJEPA |
-| `heval.py:57` | `SubgoalAdapter` | Wraps L1 JEPA. Intercepts get_cost → get_cost_from_emb(subgoal_emb). Subgoal updated each replan. |
-| `heval.py:87` | `HierarchicalWorldModelPolicy` | Extends BasePolicy. set_env configures both solvers. get_action: L2 CEM → subgoal → L1 CEM. |
+| `train.py` | `_build_hjepa` | Loads L1 from checkpoint, instantiates L2 components, returns HJEPA |
+| `train.py` | `_build_hjepa_config` | Constructs full HJEPA OmegaConf config (with `_target_: hjepa.HJEPA`) for `save_pretrained`; overrides `l1_jepa._target_` to `jepa.JEPA` so `get_cost_from_emb` is available at eval. |
+| `heval.py` | `SubgoalAdapter` | Wraps L1 JEPA. Intercepts get_cost → get_cost_from_emb(subgoal_emb). Uses a counter to index the correct per-env subgoal as the CEM iterates envs one at a time (batch_size=1). |
+| `heval.py` | `HierarchicalWorldModelPolicy` | Extends BasePolicy. set_env configures both solvers. get_action: L2 CEM → subgoal → L1 CEM. |
 
 ---
 
@@ -139,22 +139,30 @@ L2 CEM may plan latent subgoals that are geometrically valid in the Gaussian lat
 ```bash
 conda activate hlewm
 
-# Train flat L1 (baseline)
-python train.py --config-name lewm data=pusht
+# Train flat L1
+python train.py data=pusht
 
-# Evaluate flat L1
-python eval.py --config-name pusht policy=<l1_ckpt_path>
+# Evaluate flat L1 (use pre-trained HF checkpoint or local folder name after training)
+python eval.py --config-name pusht policy=FadyRezk/lewm-pusht-fixed   # pre-trained
+python eval.py --config-name pusht policy=lewm                         # after training
 
-# Train L2 (requires trained L1 checkpoint)
-python train.py --config-name hlewm data=pusht_l2 l2.l1_checkpoint=<l1_ckpt_path>
+# Train L2 (l1_checkpoint = HF repo ID or local folder name under $STABLEWM_HOME/checkpoints/)
+python train.py --config-name hlewm data=pusht_l2 l2.l1_checkpoint=FadyRezk/lewm-pusht-fixed
 
-# Evaluate hierarchical
-python heval.py --config-name hpusht policy=<hjepa_ckpt_path>
+# Evaluate hierarchical (policy = folder name written by SaveCkptCallback after training)
+python heval.py --config-name hpusht policy=hlewm
+
+# Bootstrap HJEPA for pipeline testing (random L2 weights, no training needed)
+python bootstrap_hjepa.py
+python heval.py --config-name hpusht policy=hlewm
 ```
 
+Checkpoint format (stable-worldmodel 0.1): `weights.pt` + `config.json` under
+`$STABLEWM_HOME/checkpoints/<name>/`. Pass `<name>` or an HF repo ID as `policy=`.
+
 Data sequence lengths:
-- L1: `num_steps = history_size + num_preds = 4` (set in `data/pusht.yaml` via Hydra eval)
-- L2: `num_steps = 64` (set in `data/pusht_l2.yaml`; must be ≥ `num_waypoints * min_waypoint_gap`)
+- L1: `num_steps = history_size + num_preds = 4` (set in `data/pusht.yaml`)
+- L2: `num_steps = 30` (= `num_waypoints × min_waypoint_gap`; PushT episodes cap at 246 raw frames → 49 frameskipped steps, so 30 is both the minimum and near the practical ceiling)
 
 ---
 
