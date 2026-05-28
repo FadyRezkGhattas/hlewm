@@ -134,19 +134,35 @@ cost = swm.policy.AutoCostModel('pusht/lewm')
 
 The returned module is in `eval` mode with its PyTorch weights accessible via `.state_dict()`.
 
-### From the Hugging Face mirror
+### From the Hugging Face mirror — end-to-end (PushT example)
 
-The HF model repos ship the LeWM checkpoint as a `weights.pt` (state dict) plus a
-`config.json` describing the model. Convert once to produce the `_object.ckpt`
-that `eval.py` expects:
+The HF repos ship `weights.pt` + `config.json`. The steps below download, convert,
+and evaluate in one go. Swap `pusht` for `cube`, `tworooms`, or `reacher` throughout
+for other environments.
+
+**1. Download checkpoint and dataset**
 
 ```bash
-# download weights.pt + config.json
-hf download quentinll/lewm-pusht --local-dir $STABLEWM_HOME/hf_pusht
+hf download quentinll/lewm-pusht   --local-dir $STABLEWM_HOME/hf_pusht
+hf download quentinll/pusht-expert --repo-type dataset --local-dir $STABLEWM_HOME
+```
 
-# convert to object checkpoint under $STABLEWM_HOME/pusht/lewm_object.ckpt
+If the dataset arrives as `.tar.zst`, decompress it:
+
+```bash
+tar --zstd -xvf $STABLEWM_HOME/pusht_expert_train.tar.zst -C $STABLEWM_HOME/
+```
+
+**2. Convert to object checkpoint**
+
+`eval.py` expects a pickled model at `$STABLEWM_HOME/pusht/lewm_object.ckpt`.
+Two fixes vs. the original README are applied here: Hydra `_target_` keys stripped
+from `config.json`, and ViT weight keys remapped from the older transformers naming
+convention used when the checkpoint was saved.
+
+```bash
 python - <<'PY'
-import json, torch, stable_pretraining as spt
+import json, re, torch, stable_pretraining as spt
 from pathlib import Path
 from jepa import JEPA
 from module import ARPredictor, Embedder, MLP
@@ -156,6 +172,8 @@ src = Path(swm.data.utils.get_cache_dir(), "hf_pusht")
 out = Path(swm.data.utils.get_cache_dir(), "pusht", "lewm_object.ckpt")
 
 cfg = json.loads((src / "config.json").read_text())
+def kwargs(key): return {k: v for k, v in cfg[key].items() if not k.startswith("_")}
+
 encoder = spt.backbone.utils.vit_hf(
     cfg["encoder"]["size"],
     patch_size=cfg["encoder"]["patch_size"],
@@ -166,19 +184,44 @@ mlp = lambda k: MLP(input_dim=cfg[k]["input_dim"], output_dim=cfg[k]["output_dim
                     hidden_dim=cfg[k]["hidden_dim"], norm_fn=torch.nn.BatchNorm1d)
 model = JEPA(
     encoder=encoder,
-    predictor=ARPredictor(**cfg["predictor"]),
-    action_encoder=Embedder(**cfg["action_encoder"]),
+    predictor=ARPredictor(**kwargs("predictor")),
+    action_encoder=Embedder(**kwargs("action_encoder")),
     projector=mlp("projector"),
     pred_proj=mlp("pred_proj"),
 )
+
 sd = torch.load(src / "weights.pt", map_location="cpu", weights_only=False)
+
+# Remap ViT encoder keys from old transformers naming to current naming.
+rules = [
+    (r'encoder\.encoder\.layer\.(\d+)\.attention\.attention\.query', r'encoder.layers.\1.attention.q_proj'),
+    (r'encoder\.encoder\.layer\.(\d+)\.attention\.attention\.key',   r'encoder.layers.\1.attention.k_proj'),
+    (r'encoder\.encoder\.layer\.(\d+)\.attention\.attention\.value', r'encoder.layers.\1.attention.v_proj'),
+    (r'encoder\.encoder\.layer\.(\d+)\.attention\.output\.dense',    r'encoder.layers.\1.attention.o_proj'),
+    (r'encoder\.encoder\.layer\.(\d+)\.intermediate\.dense',         r'encoder.layers.\1.mlp.fc1'),
+    (r'encoder\.encoder\.layer\.(\d+)\.output\.dense',               r'encoder.layers.\1.mlp.fc2'),
+    (r'encoder\.encoder\.layer\.(\d+)\.',                            r'encoder.layers.\1.'),
+]
+def remap(k):
+    for pattern, repl in rules:
+        k = re.sub(pattern, repl, k)
+    return k
+sd = {remap(k): v for k, v in sd.items()}
 model.load_state_dict(sd, strict=True)
+
 out.parent.mkdir(parents=True, exist_ok=True)
 torch.save(model, out)
+print("saved to", out)
 PY
 ```
 
-After conversion, load via `swm.policy.AutoCostModel('pusht/lewm')` as usual.
+**3. Evaluate**
+
+```bash
+python eval.py --config-name pusht policy=pusht/lewm
+```
+
+Expected: **86%** success rate (paper Table 1).
 
 ## Contact & Contributions
 Feel free to open [issues](https://github.com/lucas-maes/le-wm/issues)! For questions or collaborations, please contact `lucas.maes@mila.quebec`
