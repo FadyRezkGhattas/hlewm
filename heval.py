@@ -28,7 +28,7 @@ from omegaconf import DictConfig, OmegaConf
 from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 
-from hjepa import HJEPA
+from models.lewm.hier import HJEPA
 
 
 # ---------------------------------------------------------------------------

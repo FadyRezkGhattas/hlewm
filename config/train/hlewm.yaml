@@ -52,7 +52,7 @@ l2:
 
   model:
     macro_action_encoder:
-      _target_: module.MacroActionEncoder
+      _target_: models.modules.module.MacroActionEncoder
       action_dim: ???         # set at runtime: frameskip * raw_action_dim
       macro_dim: ${embed_dim}
       hidden_dim: ${embed_dim}
@@ -63,7 +63,7 @@ l2:
       dropout: 0.1
 
     predictor:
-      _target_: module.ARPredictor
+      _target_: models.modules.module.ARPredictor
       num_frames: ${l2.num_waypoints}
       input_dim: ${embed_dim}
       hidden_dim: ${embed_dim}
@@ -76,7 +76,7 @@ l2:
       emb_dropout: 0.0
 
     pred_proj:
-      _target_: module.MLP
+      _target_: models.modules.module.MLP
       input_dim: ${embed_dim}
       output_dim: ${embed_dim}
       hidden_dim: 2048
