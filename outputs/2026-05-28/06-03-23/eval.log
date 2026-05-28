@@ -1,0 +1,4 @@
+[2026-05-28 06:03:25,323][datasets][INFO] - JAX version 0.6.2 available.
+[2026-05-28 06:03:28,477][root][INFO] - Cached 'action' from '/home/s1985200/.stable_worldmodel/datasets/pusht_expert_train.h5'
+[2026-05-28 06:03:28,521][root][INFO] - Cached 'proprio' from '/home/s1985200/.stable_worldmodel/datasets/pusht_expert_train.h5'
+[2026-05-28 06:03:28,586][root][INFO] - Cached 'state' from '/home/s1985200/.stable_worldmodel/datasets/pusht_expert_train.h5'

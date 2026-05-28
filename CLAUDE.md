@@ -1,139 +1,200 @@
-# Research Context: HWM & LeWM
+# le-wm Codebase Guide
 
-This directory contains two papers and their codebases for world-model-based planning via JEPA-style latent prediction. Read this file first; then follow pointers below as needed.
-
----
-
-## Papers
-
-| Paper | PDF | Summary |
-|---|---|---|
-| **HWM** — Hierarchical Planning with Latent World Models | `hwm.pdf` | Adds a high-level world model (macro-actions over waypoints) on top of any existing latent WM; enables hierarchical CEM/MPPI planning; solves non-greedy tasks where flat planners fail. |
-| **LeWM** — LeWorldModel | `le-wm.pdf` | End-to-end JEPA trained from raw pixels; collapse prevented by SIGReg (Gaussian regularizer); no EMA, no frozen encoder; 15M params, trains on one GPU; 48× faster planning than DINO-WM. |
-
-Full paper notes: [`research/papers/hwm.md`](research/papers/hwm.md) | [`research/papers/lewm.md`](research/papers/lewm.md)
+This directory implements **LeWM** (flat, single-level) and **HLEWM** (hierarchical two-level extension).
+Read this file before editing any code. It is self-contained — you do not need the parent `research/` directory.
 
 ---
 
-## Codebases
+## What this codebase does
 
-| Repo | Paper | Language | Key modules |
-|---|---|---|---|
-| `HWM_PLDM/` | HWM (Diverse Maze backend) | Python | `pldm/models/hjepa.py` — 2-level wrapper; `pldm/models/jepa.py` — single-level JEPA; `pldm/planning/planners/two_lvl_planner.py` — hierarchical MPPI; `pldm/objectives/prediction.py` — MSE loss |
-| `le-wm/` | LeWM + HLEWM extension | Python | `jepa.py` — encode/predict/rollout/cost; `module.py` — SIGReg + AdaLN-zero transformer; `train.py` — training loop; `eval.py` — CEM planning; `hjepa.py` — hierarchical two-level WM; `heval.py` — hierarchical CEM eval |
+**LeWM (flat):** End-to-end JEPA world model trained from raw pixels. Encoder + predictor trained jointly; collapse prevented by SIGReg (Gaussian regularizer). Plans via flat CEM in 192-dim latent space. 15M params, single GPU, few hours.
 
-Full code notes: [`research/code/hwm_pldm.md`](research/code/hwm_pldm.md) | [`research/code/le_wm.md`](research/code/le_wm.md)
+**HLEWM (hierarchical):** Adds a second-level world model on top of frozen L1 LeWM. L2 plans at a longer timescale via macro-action embeddings → produces subgoals in the shared latent space → L1 CEM reaches each subgoal with primitive actions. Motivation: flat CEM accumulates prediction errors over long horizons and fails on non-greedy tasks. Hierarchy reduces the number of sequential prediction steps needed to reach distant goals.
 
-### HWM_PLDM — Key module roles
+---
+
+## File map
+
+| File | Role |
+|---|---|
+| `jepa.py` | `JEPA`: encode/predict/rollout/get_cost. Flat L1 world model. |
+| `module.py` | `SIGReg`, `ARPredictor`, `Embedder`, `MLP`, `MacroActionEncoder`, `Transformer`, `ConditionalBlock` |
+| `train.py` | `lejepa_forward` (L1), `l2_forward` (L2), `_build_hjepa`. Switches on `train_level` config flag. |
+| `hjepa.py` | `HJEPA`: two-level wrapper. Frozen L1 + trainable L2 predictor + MacroActionEncoder. |
+| `eval.py` | Flat L1 CEM evaluation via `WorldModelPolicy`. Unchanged from original LeWM. |
+| `heval.py` | Hierarchical CEM evaluation. `SubgoalAdapter`, `HierarchicalWorldModelPolicy`. |
+| `utils.py` | `get_img_preprocessor`, `get_column_normalizer`, `SaveCkptCallback` |
+| `config/train/lewm.yaml` | L1 training config |
+| `config/train/hlewm.yaml` | L2 training config (`train_level: 2`) |
+| `config/train/data/pusht_l2.yaml` | PushT data config with `num_steps: 64` for L2 trajectory length |
+| `config/eval/pusht.yaml` | Flat L1 eval config |
+| `config/eval/hpusht.yaml` | Hierarchical eval config |
+
+---
+
+## Key module roles
+
+### Flat LeWM (L1)
 
 | File:Line | Module | Role |
 |---|---|---|
-| `pldm/models/hjepa.py:28` | `HJEPA` | Two-level container: `level1` (frozen PLDM) + `level2` (trainable high-level WM) |
-| `pldm/models/hjepa.py:79` | `HJEPA.encode_actions` | **Sums** primitive action chunks → L2 macro-actions (not a learned transformer; maze-specific) |
-| `pldm/models/hjepa.py:122` | `HJEPA.forward_posterior` | Training forward: optionally runs L1, always runs L2 on L1-encoded waypoints |
-| `pldm/models/jepa.py:39` | `JEPA` | Single-level world model: backbone encoder + predictor; used for both L1 and L2 |
-| `pldm/planning/planners/two_lvl_planner.py:11` | `TwoLvlPlanner` | Hierarchical MPPI: L2 plan → subgoal → L1 MPPI to reach subgoal |
-| `pldm/objectives/prediction.py:39` | `PredictionObjective` | MSE loss: `(encodings - predictions).pow(2).mean()` |
-| `pldm/objectives/vicreg.py` | `VICRegObjective` | VICReg anti-collapse for L1 training |
-| `pldm_envs/diverse_maze/d4rl.py:17` | `D4RLDataset` | Loads offline maze trajectories; produces L1 + L2 (chunked) samples |
-| `pldm_envs/utils/normalizer.py:48` | `Normalizer` | Normalizes states, actions, L2 latents; passed into HJEPA |
-| `pldm/train.py:216` | `Trainer` | Training loop, optimizer, checkpointing; config via YAML + OmegaConf |
-
-### le-wm — Key module roles
-
-**Flat LeWM (L1):**
-
-| File:Line | Module | Role |
-|---|---|---|
-| `jepa.py:11` | `JEPA` | Top-level model: wraps encoder, predictor, projectors, action encoder |
+| `jepa.py:11` | `JEPA` | Top-level model: encoder, predictor, projectors, action encoder |
 | `jepa.py:29` | `JEPA.encode` | pixels → ViT-Tiny → CLS token → MLP+BN → z_t; also encodes actions via Embedder |
 | `jepa.py:47` | `JEPA.predict` | context emb + act emb → ARPredictor → pred_proj → ẑ_{t+1} |
-| `jepa.py:61` | `JEPA.rollout` | Multi-step autoregressive prediction for CEM planning |
-| `jepa.py:128` | `JEPA.get_cost_from_emb` | Like get_cost but accepts precomputed goal embedding; used by L1 CEM in hierarchical eval |
-| `jepa.py:147` | `JEPA.get_cost` | Encode goal, rollout, return MSE cost — interface to CEM solver |
-| `module.py:10` | `SIGReg` | Gaussian regularizer: projects embeddings onto random directions, minimizes Epps-Pulley normality statistic |
-| `module.py:88` | `ConditionalBlock` | AdaLN-zero transformer block: action embedding generates shift/scale/gate via zero-init linear |
+| `jepa.py:61` | `JEPA.rollout` | Multi-step autoregressive rollout for CEM |
+| `jepa.py:112` | `JEPA.criterion` | MSE(pred_emb[-1], goal_emb[-1]) — terminal cost |
+| `jepa.py:128` | `JEPA.get_cost_from_emb` | Like get_cost but takes precomputed goal embedding; used by L1 CEM at hierarchical inference |
+| `jepa.py:147` | `JEPA.get_cost` | Encode goal pixels, rollout, return MSE cost — CEM interface |
+| `module.py:10` | `SIGReg` | Gaussian regularizer for L1 training only. Projects embs onto 1024 random dirs, minimizes Epps-Pulley statistic |
+| `module.py:88` | `ConditionalBlock` | AdaLN-zero transformer block. Action emb → shift/scale/gate (zero-init → neutral at start) |
 | `module.py:189` | `Embedder` | L1 action encoder: Conv1d + MLP maps per-timestep actions → embeddings |
-| `module.py:217` | `MacroActionEncoder` | **Training-only** L2 action encoder: transformer+CLS over variable-length action chunks → macro embedding. NOT called at inference. |
-| `module.py:268` | `MLP` | Projector (with BatchNorm1d): used post-encoder and post-predictor |
-| `module.py:295` | `ARPredictor` | ViT-S autoregressive predictor with causal masking + AdaLN-zero conditioning |
-| `train.py:17` | `lejepa_forward` | L1 loss: encode → predict → MSE + λ·SIGReg |
+| `module.py:217` | `MLP` | Projector with BatchNorm1d: used post-encoder and post-predictor |
+| `module.py:295` | `ARPredictor` | ViT-S causal predictor with AdaLN-zero conditioning |
+| `train.py:17` | `lejepa_forward` | L1 loss: MSE + λ·SIGReg |
 
-**HLEWM extension (L2):**
+### HLEWM (L2 extension)
 
 | File:Line | Module | Role |
 |---|---|---|
+| `module.py:217` | `MacroActionEncoder` | Transformer + CLS over variable-length primitive-action chunks → fixed macro embedding. **Training only** — not called at inference. |
 | `hjepa.py:17` | `HJEPA` | Two-level container: frozen L1 JEPA + trainable L2 predictor + MacroActionEncoder |
-| `hjepa.py:41` | `HJEPA.encode_waypoints` | Encodes waypoint pixels via frozen L1 encoder. Used at training AND inference. |
-| `hjepa.py:58` | `HJEPA.encode_macro_actions` | **Training only.** Maps raw action chunks → macro embeddings via MacroActionEncoder. |
-| `hjepa.py:73` | `HJEPA.predict` | Teacher-forced L2 prediction (waypoint_embs, macro_embs) → next waypoint emb |
-| `hjepa.py:97` | `HJEPA.rollout_l2` | **Inference only.** Takes macro embeddings directly as CEM candidates — no encoding. |
-| `hjepa.py:130` | `HJEPA.get_cost` | Routes to get_l2_cost; makes HJEPA drop-in compatible with WorldModelPolicy |
-| `hjepa.py:143` | `HJEPA.get_l2_cost` | L2 CEM cost: rollout_l2 → terminal MSE to goal embedding |
-| `hjepa.py:175` | `HJEPA.get_l1_cost` | L1 CEM cost targeting L2 subgoal embedding |
+| `hjepa.py:41` | `HJEPA.encode_waypoints` | Encodes waypoint pixels via frozen L1 encoder. Called at training AND inference. |
+| `hjepa.py:58` | `HJEPA.encode_macro_actions` | **Training only.** Maps raw action chunks via MacroActionEncoder → macro embeddings. |
+| `hjepa.py:73` | `HJEPA.predict` | Teacher-forced L2 prediction. Input: (waypoint_embs, macro_embs). MSE target. |
+| `hjepa.py:97` | `HJEPA.rollout_l2` | **Inference only.** Takes macro embeddings directly (no encoding). CEM candidates ARE the macro embeddings. |
+| `hjepa.py:130` | `HJEPA.get_cost` | Routes to get_l2_cost. Makes HJEPA compatible with WorldModelPolicy as L2 planner. |
+| `hjepa.py:143` | `HJEPA.get_l2_cost` | L2 CEM cost: encode current obs + goal → rollout_l2 → terminal MSE |
 | `train.py:55` | `l2_forward` | L2 loss: random waypoint sampling → MSE only, no SIGReg |
-| `train.py:97` | `_build_hjepa` | Loads frozen L1 from checkpoint, builds HJEPA |
-| `heval.py:57` | `SubgoalAdapter` | Wraps L1 JEPA; intercepts get_cost → get_cost_from_emb(subgoal_emb) |
-| `heval.py:87` | `HierarchicalWorldModelPolicy` | Two-level CEM policy: L2 CEM → subgoal → L1 CEM. Extends BasePolicy. |
+| `train.py` | `_build_hjepa` | Loads L1 from checkpoint, instantiates L2 components, returns HJEPA |
+| `train.py` | `_build_hjepa_config` | Constructs full HJEPA OmegaConf config (with `_target_: hjepa.HJEPA`) for `save_pretrained`; overrides `l1_jepa._target_` to `jepa.JEPA` so `get_cost_from_emb` is available at eval. |
+| `heval.py` | `SubgoalAdapter` | Wraps L1 JEPA. Intercepts get_cost → get_cost_from_emb(subgoal_emb). Uses a counter to index the correct per-env subgoal as the CEM iterates envs one at a time (batch_size=1). |
+| `heval.py` | `HierarchicalWorldModelPolicy` | Extends BasePolicy. set_env configures both solvers. get_action: L2 CEM → subgoal → L1 CEM. |
 
 ---
 
-## Research Docs
+## Critical design decisions (read before modifying anything)
 
-| File | Contents |
-|---|---|
-| [`research/comparison.md`](research/comparison.md) | HWM vs LeWM side-by-side on all key design axes; prose on conceptual differences |
-| [`research/glossary.md`](research/glossary.md) | Every overloaded term (latent, target, context, predictor, world model, level, plan, macro-action…) defined per-paper |
-| [`research/open_questions.md`](research/open_questions.md) | What neither paper resolves; direction-agnostic |
-| [`research/notes_corrections.md`](research/notes_corrections.md) | Corrections to `jepa_notes.md` with paper/code citations |
+### 1. MacroActionEncoder is training-only — CEM searches in macro embedding space directly
 
-Direction-specific work lives under [`research/directions/`](research/directions/). That folder may opine freely; everything else in `research/` stays neutral.
+At **training**: `encode_macro_actions(action_chunks)` maps raw primitive-action chunks → macro embeddings via the transformer. L2 predictor learns to condition on these embeddings.
+
+At **inference** (L2 CEM): `rollout_l2(wp0, macro_emb_sequence)` takes macro embeddings **directly** as CEM candidates. The CEM optimises in this `embed_dim=192` space without going through MacroActionEncoder. This is correct: the CEM searches in the same space that MacroActionEncoder maps to at training time.
+
+**If you add a MacroActionEncoder call inside `rollout_l2`, you will break L2 CEM.** The L2 CEMSolver configures with `action_dim = 192` (macro embedding dim) and samples in that space.
+
+### 2. Shared latent space — enforced by reusing frozen L1 encoder
+
+L2 predictions must live in the same latent space as L1 embeddings so that L2 subgoals can be passed directly to L1 CEM as targets. This is guaranteed by having `encode_waypoints` use `self.l1_jepa.encoder` + `self.l1_jepa.projector`. **Do not introduce a separate L2 encoder** — it would produce embeddings in a different space, breaking subgoal transfer.
+
+### 3. BatchNorm must stay in eval mode during L2 training
+
+L1's projector has `BatchNorm1d`. During L2 training, the L1 encoder is frozen. Lightning calls `model.train()` at each epoch start, which would put BN into training mode and start updating its running statistics from L2 training data. This corrupts the BN statistics that L1 learned, silently shifting the latent space.
+
+`HJEPA.train()` overrides this by always calling `self.l1_jepa.eval()` after `super().train(mode)`. **Do not remove this override.**
+
+### 4. No SIGReg for L2 training
+
+L2 training loss is MSE only (`l2_forward`). The L1 encoder is frozen and already produces roughly Gaussian-distributed embeddings (from SIGReg during L1 training). Adding SIGReg to L2 would be redundant and could distort the already-regularized geometry. The `spt.Module` for L2 training is constructed without a `sigreg=` argument.
+
+### 5. Random waypoint sampling — why it requires the transformer action encoder
+
+Waypoints are sampled randomly within a trajectory (fixed start and end, random intermediates). This means the primitive-action chunks between consecutive waypoints have **variable length** across different batches. The transformer+CLS in `MacroActionEncoder` handles variable lengths naturally. An MLP could not — it requires fixed input size.
+
+Fixed-stride sampling (like HWM's maze backend) would allow an MLP. Random sampling is used here to expose the L2 model to diverse transition lengths, producing a more general high-level model.
+
+### 6. Teacher-forcing only for L2 (no rollout loss)
+
+`l2_forward` uses teacher-forcing: context = ground-truth waypoints, target = next ground-truth waypoint. There is no rollout loss where L2 predicts from its own outputs. This matches HWM's finding that L2 rollout loss does not improve performance and complicates training. The L2 predictor has never seen its own predictions during training; this is a known limitation.
+
+### 7. L2 CEM fake action space
+
+The `CEMSolver` gets its `action_dim` from `env.action_space.shape[1:]`. For L2, there is no real environment action space — macro actions are 192-dim embeddings. `HierarchicalWorldModelPolicy.set_env` configures the L2 solver with a fake `gymnasium.spaces.Box(shape=(1, 192))`, giving `_action_dim = 192` and with `action_block=1` → `action_dim = 192`. **If you change `embed_dim`, update `hpusht.yaml:macro_action_dim` too.**
+
+### 8. Known failure mode: subgoal reachability
+
+L2 CEM may plan latent subgoals that are geometrically valid in the Gaussian latent space but dynamically unreachable by L1 CEM. There is no formal reachability guarantee. If L1 consistently fails to reach L2 subgoals, the root cause is usually insufficient data coverage or a mismatch between L2's planned timescale and L1's planning horizon.
 
 ---
 
-## Critical Paper-vs-Code Deltas (read before editing code)
+## Critical paper-vs-code deltas
 
-**HWM_PLDM (maze backend):**
-- Action encoder = fixed sum (`hjepa.py:101`), not transformer. Transformer described in paper applies to Franka backend (different repo).
-- Loss = MSE (`prediction.py:83`), not L1 as paper states.
-- No explicit waypoint sampling; uses fixed temporal stride `step_skip=10`.
-- `root_path` hardcoded in every YAML as `/scratch/wz1232/HWM_PLDM` — must override.
-
-**le-wm:**
+**Flat LeWM:**
 - SIGReg runs on all timesteps jointly (`emb.transpose(0,1)` = `(T,B,D)`), not per-timestep.
 - SIGReg quadrature range is `[0,3]` in code (`module.py:16`), not `[0.2,4]` as paper states.
-- MPC executes full 5-step plan before replanning (not step-by-step receding horizon).
-- BatchNorm1d in projector is set by config (`model/lewm.yaml:35`), not code default; changing it silently breaks SIGReg.
-- AdaLN uses SiLU (not GELU).
+- MPC executes full 5-step plan before replanning (receding_horizon=5), not step-by-step.
+- BatchNorm1d in projector is set by config (`model/lewm.yaml`); changing to LayerNorm silently breaks SIGReg gradient flow.
+- AdaLN uses SiLU, not GELU.
 
-**HLEWM extension (not in any paper — our implementation):**
-- `MacroActionEncoder` is training-only. At inference, L2 CEM candidates ARE macro embeddings; `rollout_l2` takes them directly without encoding. Do not add a MacroActionEncoder call inside `rollout_l2`.
-- `HJEPA.train()` overrides Lightning's `model.train()` to keep `l1_jepa` in eval mode. Without this, BN running stats drift during L2 training and corrupt the shared latent space.
-- No SIGReg for L2. L1 encoder already produces Gaussian-ish embeddings; adding SIGReg to L2 would distort them.
-- L2 CEM fake action space = `gymnasium.spaces.Box(shape=(1, embed_dim))` so `CEMSolver._action_dim = embed_dim = 192`. If `embed_dim` changes, update `hpusht.yaml:l2_plan_config.macro_action_dim` too.
-- Waypoint sampling is random (fixed endpoints, random intermediates) — not fixed stride. Fixed stride is HWM maze-specific and not used here. Random sampling requires the transformer action encoder because chunk lengths vary across batches.
-- Teacher-forcing only for L2 (no rollout loss), consistent with HWM Franka. L2 has never seen its own predictions during training.
-- Full documentation at `le-wm/CLAUDE.md`.
+**HLEWM (our extension, not in any paper):**
+- Macro-action encoder is training-only. Papers (HWM Franka) describe a transformer encoder; our inference bypasses it entirely — CEM searches in macro embedding space directly.
+- L2 training loss = MSE only. HWM paper describes L1 loss for Franka; our code uses MSE throughout (consistent with LeWM).
+- Waypoint sampling = random intermediates in a range (matching HWM Franka). HWM maze code uses fixed stride=10 — that is maze-specific and not used here.
+- No rollout loss for L2. HWM maze code uses rollout-only for both levels; our L2 uses teacher-forcing only.
+- L2 CEM fake action space = `Box(shape=(1, 192))` — not described anywhere; derived from CEMSolver internals.
 
 ---
 
-## Quick orientation
+## Workflow
 
-**If you're exploring HWM:** Start at `research/papers/hwm.md` for the paper, then `research/code/hwm_pldm.md` for the maze codebase. Note this repo covers only the maze (PLDM) backend; Franka and Push-T use different codebases.
+```bash
+conda activate hlewm
 
-**If you're exploring LeWM:** `research/papers/lewm.md` then `research/code/le_wm.md`. The entire training loop is in `train.py:lejepa_forward` (~25 lines). Core architecture is in `module.py`.
+# Train flat L1
+python train.py data=pusht
 
-**If you're working on the HLEWM extension:** Start at `le-wm/CLAUDE.md` — it is fully self-contained and does not require `research/` or `HWM_PLDM/`.
+# Evaluate flat L1 (use pre-trained HF checkpoint or local folder name after training)
+python eval.py --config-name pusht policy=FadyRezk/lewm-pusht-fixed   # pre-trained
+python eval.py --config-name pusht policy=lewm                         # after training
 
-**If you want to compare them:** `research/comparison.md`. **If a term is ambiguous:** `research/glossary.md`.
+# Train L2 (l1_checkpoint = HF repo ID or local folder name under $STABLEWM_HOME/checkpoints/)
+python train.py --config-name hlewm data=pusht_l2 l2.l1_checkpoint=FadyRezk/lewm-pusht-fixed
 
-# Behavioural Guidelines for Implementation
+# Evaluate hierarchical (policy = folder name written by SaveCkptCallback after training)
+python heval.py --config-name hpusht policy=hlewm
+
+# Bootstrap HJEPA for pipeline testing (random L2 weights, no training needed)
+python bootstrap_hjepa.py
+python heval.py --config-name hpusht policy=hlewm
+```
+
+Checkpoint format (stable-worldmodel 0.1): `weights.pt` + `config.json` under
+`$STABLEWM_HOME/checkpoints/<name>/`. Pass `<name>` or an HF repo ID as `policy=`.
+
+Data sequence lengths:
+- L1: `num_steps = history_size + num_preds = 4` (set in `data/pusht.yaml`)
+- L2: `num_steps = 30` (= `num_waypoints × min_waypoint_gap`; PushT episodes cap at 246 raw frames → 49 frameskipped steps, so 30 is both the minimum and near the practical ceiling)
+
+---
+
+## stable-worldmodel interface notes
+
+`CEMSolver.solve(info_dict)` returns `{'actions': tensor(B, H, action_dim), ...}`.
+
+`WorldModelPolicy.get_action(info_dict)`:
+- Manages per-env action buffer (deque)
+- Replans when buffer is empty
+- Calls `solver(sliced_info)` → buffers `receding_horizon` steps → pops one per step
+
+`CEMSolver` calls `model.get_cost(expanded_info, candidates)` where:
+- `expanded_info`: each tensor has shape `(B, S, ...)` (B envs, S samples)
+- `candidates`: `(B, S, H, action_dim)`
+- Returns: `(B, S)` cost
+
+`PlanConfig` fields: `horizon`, `receding_horizon`, `action_block`, `history_len`, `warm_start`.
+
+`CEMSolver.configure(action_space, n_envs, config)`:
+- `_action_dim = np.prod(action_space.shape[1:])`
+- `action_dim = _action_dim * config.action_block`
+
+---
+
+## Behavioural Guidelines for Implementation
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-## 1. Think Before Coding
+### 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
@@ -143,7 +204,7 @@ Before implementing:
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
 
-## 2. Simplicity First
+### 2. Simplicity First
 
 **Minimum code that solves the problem. Nothing speculative.**
 
@@ -155,7 +216,7 @@ Before implementing:
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
-## 3. Surgical Changes
+### 3. Surgical Changes
 
 **Touch only what you must. Clean up only your own mess.**
 
@@ -171,7 +232,7 @@ When your changes create orphans:
 
 The test: Every changed line should trace directly to the user's request.
 
-## 4. Goal-Driven Execution
+### 4. Goal-Driven Execution
 
 **Define success criteria. Loop until verified.**
 
